@@ -7,7 +7,7 @@
 	<parent>
 		<groupId>de.Linus122.TimeIsMoney</groupId>
 		<artifactId>parent</artifactId>
-		<version>1.9.9</version>
+		<version>1.9.11</version>
 		<relativePath>../pom.xml</relativePath>
 	</parent>
 
@@ -33,7 +33,7 @@
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-shade-plugin</artifactId>
-				<version>2.4.3</version>
+				<version>3.5.2</version>
 				<executions>
 					<execution>
 						<phase>package</phase>
@@ -46,12 +46,17 @@
 									<include>de.Linus122.TimeIsMoney:*</include>
 									<include>xyz.spaceio:SpaceGUI</include>
 									<include>xyz.spaceio:Metrics</include>
+									<include>com.github.Euphillya:Energie</include>
 								</includes>
 							</artifactSet>
 							<relocations>
 								<relocation>
 									<pattern>xyz.spaceio</pattern>
 									<shadedPattern>de.Linus122.net.xyz.spaceio</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>fr.euphyllia</pattern>
+									<shadedPattern>de.Linus122.fr.euphyllia</shadedPattern>
 								</relocation>
 							</relocations>
 						</configuration>
@@ -76,7 +81,7 @@
 		<dependency>
 			<groupId>org.spigotmc</groupId>
 			<artifactId>spigot-api</artifactId>
-			<version>1.18-R0.1-SNAPSHOT</version>
+			<version>1.13.2-R0.1-SNAPSHOT</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
@@ -84,6 +89,11 @@
 			<artifactId>VaultAPI</artifactId>
 			<version>1.7</version>
 			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>com.github.Euphillya</groupId>
+			<artifactId>Energie</artifactId>
+			<version>1.2.0</version>
 		</dependency>
 		<dependency>
 			<groupId>net.ess3</groupId>
@@ -99,7 +109,7 @@
 		<dependency>
 			<groupId>xyz.spaceio</groupId>
 			<artifactId>SpaceGUI</artifactId>
-			<version>0.0.4-SNAPSHOT</version>
+			<version>0.0.8-SNAPSHOT</version>
 			<scope>compile</scope>
 		</dependency>
 		<!--SpaceIO Metrics -->
@@ -111,7 +121,7 @@
 		<dependency>
 			<groupId>de.Linus122.TimeIsMoney</groupId>
 			<artifactId>Tools</artifactId>
-			<version>1.9.9</version>
+			<version>1.9.11</version>
 		</dependency>
         <dependency>
             <groupId>org.jetbrains</groupId>

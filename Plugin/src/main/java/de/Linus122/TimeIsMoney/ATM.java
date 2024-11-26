@@ -12,6 +12,7 @@ import java.util.Map.Entry;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import fr.euphyllia.energie.model.SchedulerType;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -90,8 +91,8 @@ public class ATM implements Listener, CommandExecutor {
 		plugin.getServer().getPluginManager().registerEvents(this, plugin);
 		
 		worths = Doubles.toArray(Main.finalconfig.getDoubleList("atm_worth_gradation"));
-		
-		gui = new SpaceGUI().title("§cATM").size(9*3).fillBackground(new SpaceItem().setStack(DecorationMaterial.GRAY_STAINED_GLASS_PANE.get()));
+		gui = new SpaceGUI().title("§cATM").size(9*3);
+		gui.fillBackground(new SpaceItem().setStack(DecorationMaterial.GRAY_STAINED_GLASS_PANE.get()));
 		
 		FileConfiguration fileConfig = new YamlConfiguration();
 	
@@ -186,6 +187,10 @@ public class ATM implements Listener, CommandExecutor {
 	}
 	
 	private static void interactDeposit(Player p, double amount) {
+		if (ATM.getBankBalance(p) >= Main.finalconfig.getDouble("atm_balance_limit", Double.MAX_VALUE)) {
+			p.sendMessage(CC(Main.finalconfig.getString("message_atm_limit_reached")));
+			return;
+		}
 		if (Main.economy.has(p, amount)) {
 			ATM.depositBank(p, amount);
 			Main.economy.withdrawPlayer(p, amount);
@@ -233,7 +238,7 @@ public class ATM implements Listener, CommandExecutor {
 	/**
 	 * Checks if the player has the specified amount of money in their bank.
 	 *
-	 * @param p The player to check the balance of.
+	 * @param player The player to check the balance of.
 	 * @param amount The amount of money.
 	 * @return True if the player has the specified amount of money, false otherwise.
 	 */
@@ -382,7 +387,7 @@ public class ATM implements Listener, CommandExecutor {
 		final Block b = e.getBlock();
 		
 		if (b.getState() instanceof Sign) {
-			plugin.getServer().getScheduler().scheduleSyncDelayedTask(plugin, () -> {
+			Main.scheduler.runDelayed(SchedulerType.SYNC, e.getBlock().getLocation(), task -> {
 				if (b.getState() instanceof Sign) {
 					Sign sign = (Sign) e.getBlock().getState();
 					if (sign.getLine(0).equalsIgnoreCase("[ATM]") 

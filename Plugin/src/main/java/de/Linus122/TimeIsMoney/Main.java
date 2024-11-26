@@ -8,23 +8,16 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.sql.Timestamp;
-import java.util.ArrayList;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Random;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
-import de.Linus122.TimeIsMoney.data.MySQLPluginData;
-import de.Linus122.TimeIsMoney.data.PlayerData;
-import de.Linus122.TimeIsMoney.data.PluginData;
-import de.Linus122.TimeIsMoney.data.YamlPluginData;
+import de.Linus122.TimeIsMoney.data.*;
+import de.Linus122.TimeIsMoney.tools.Utils;
+import fr.euphyllia.energie.Energie;
+import fr.euphyllia.energie.model.Scheduler;
+import fr.euphyllia.energie.model.SchedulerType;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Server;
@@ -57,6 +50,10 @@ public class Main extends JavaPlugin {
 	 * The economy being used by vault.
 	 */
 	static net.milkbowl.vault.economy.Economy economy = null;
+	/**
+	 * The scheduler being used by compatible with folia.
+	 */
+	public static Scheduler scheduler;
 	/**
 	 * The config version number.
 	 */
@@ -105,6 +102,7 @@ public class Main extends JavaPlugin {
 	@Override
 	public void onEnable() {
 
+		scheduler = new Energie(this).getMinecraftScheduler();
 		this.getCommand("timeismoney").setExecutor(new Cmd(this));
 		PL_VERSION = this.getDescription().getVersion();
 		
@@ -173,28 +171,40 @@ public class Main extends JavaPlugin {
 		if (Bukkit.getPluginManager().isPluginEnabled("Essentials") && this.getConfig().getBoolean("afk_use_essentials")) {
 			logger.info("Time is Money: Essentials found. Hook in it -> Will use Essentials's AFK feature if afk is enabled.");
 		}
-		new Metrics(this);
+		if (!Energie.isFolia())
+			new Metrics(this);
 		
 		logger.info(CC("&aTime is Money &2v" + PL_VERSION + " &astarted."));
 	}
 	
 	public void startPlaytimeWatcher() {
-		playtimeWatcherTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+		String intervalString = getConfig().getString("global_interval", getConfig().getInt("give_money_every_second") + "s");
+		int globalTimerSeconds = Utils.parseTimeFormat(intervalString);
+
+		scheduler.runAtFixedRate(SchedulerType.SYNC, task -> {
 			for (Player player : Bukkit.getOnlinePlayers()) {
 				if (disabledWorlds.contains(player.getWorld().getName())) continue;
 				PlayerData playerData = this.pluginData.getPlayerData(player);
 
-				playerData.setSecondsSinceLastPayout(playerData.getSecondsSinceLastPayout() + 1);
-				if (playerData.getSecondsSinceLastPayout() >= getConfig().getInt("give_money_every_second")) {
-					// new payout triggered, handling the payout
-					pay(player);
+				for(Payout payout : this.getApplicablePayoutsForPlayer(player)) {
+					PayoutData playerPayoutData = playerData.getPayoutData(payout.id);
+					playerPayoutData.setSecondsSinceLastPayout(playerPayoutData.getSecondsSinceLastPayout() + 1);
 
-					if(this.pluginData instanceof MySQLPluginData) {
-						// let other servers know of this payout
-						((MySQLPluginData) this.pluginData).createPendingPayout(player);
+					int intervalSeconds = payout.interval != 0 ? payout.interval : globalTimerSeconds;
+
+					if (playerPayoutData.getSecondsSinceLastPayout() >= intervalSeconds) {
+						// new payout triggered, handling the payout
+						pay(player, payout, playerPayoutData);
+
+						if(this.pluginData instanceof MySQLPluginData) {
+							// let other servers know of this payout
+							((MySQLPluginData) this.pluginData).createPendingPayout(player);
+						}
+						playerPayoutData.setSecondsSinceLastPayout(0);
 					}
-					playerData.setSecondsSinceLastPayout(0);
 				}
+
+
 			}
 		}, 20L, 20L);
 	}
@@ -204,7 +214,7 @@ public class Main extends JavaPlugin {
 	 */
 	@Override
 	public void onDisable() {
-		playtimeWatcherTask.cancel();
+		scheduler.cancelAllTask();
 
 		this.pluginData.saveData();
 
@@ -228,6 +238,7 @@ public class Main extends JavaPlugin {
 			payouts.clear();
 			for (String key : finalconfig.getConfigurationSection("payouts").getKeys(false)) {
 				Payout payout = new Payout();
+				payout.id = Integer.parseInt(key);
 				payout.max_payout_per_day = finalconfig.getDouble("payouts." + key + ".max_payout_per_day");
 				payout.payout_amount = finalconfig.getDouble("payouts." + key + ".payout_amount");
 				if (finalconfig.isSet("payouts." + key + ".permission")) {
@@ -242,6 +253,10 @@ public class Main extends JavaPlugin {
 				
 				if (finalconfig.isSet("payouts." + key + ".chance")) {
 					payout.chance = finalconfig.getDouble("payouts." + key + ".chance");
+				}
+				if (finalconfig.isSet("payouts." + key + ".interval")) {
+					// TODO: Add error message when parsing failed
+					payout.interval = Utils.parseTimeFormat(finalconfig.getString("payouts." + key + ".interval"));
 				}
 				payouts.add(payout);
 			}
@@ -274,7 +289,32 @@ public class Main extends JavaPlugin {
 	private List<Payout> getApplicablePayoutsForPlayer(Player player){
 		if (!this.getConfig().getBoolean("choose-payout-by-chance")) {
 			// Choose applicable payouts by permission
-			return payouts.stream().filter(payout -> player.hasPermission(payout.permission) || payout.permission.length() == 0).collect(Collectors.toList());
+			List<Payout> payouts_ = payouts.stream().filter(payout -> player.hasPermission(payout.permission) || payout.permission.length() == 0).collect(Collectors.toList());
+
+			if(finalconfig.getBoolean("choose-only-one-payout", true)) {
+				List<Payout> finalPayouts = new ArrayList<>();
+				// add payouts with a custom timer anyways
+				finalPayouts.addAll(payouts_.stream().filter(payout -> payout.interval != 0).collect(Collectors.toList()));
+
+				// choose the last element of the payouts that does not have a custom timer
+				List<Payout> payoutsWithoutInterval = payouts_.stream().filter(payout -> payout.interval == 0).collect(Collectors.toList());
+				finalPayouts.add(payoutsWithoutInterval.get(payoutsWithoutInterval.size() - 1));
+				return finalPayouts;
+			} else if(this.getConfig().getBoolean("merge-payouts")) {
+				// Mering multiple payouts to one
+				Payout payout = new Payout();
+				payout.id = 1;
+				for (Payout payout_ : payouts_) {
+					if(payout_.interval != 0) {
+						continue;
+					}
+					payout.commands.addAll(payout_.commands);
+					payout.commands_if_afk.addAll(payout_.commands_if_afk);
+					payout.payout_amount += payout_.payout_amount;
+					payout.max_payout_per_day += payout_.max_payout_per_day;
+				}
+			}
+			return payouts_;
 		}else {
 			// Get a random payout
 			Random rnd = new Random();
@@ -297,34 +337,11 @@ public class Main extends JavaPlugin {
 	 *
 	 * @param player The player to pay.
 	 */
-	public void pay(Player player) {
+	public void pay(Player player, Payout payout, PayoutData payoutPlayerData) {
 		if (player == null) return;
 
-		PlayerData playerData = this.pluginData.getPlayerData(player);
-		
-		//REACHED MAX PAYOUT CHECK
-
-		List<Payout> applicablePayouts = this.getApplicablePayoutsForPlayer(player);
-		if (applicablePayouts.size() == 0) {
-			return;
-		}
-		
-		Payout payout = new Payout();
-		
-		if(this.getConfig().getBoolean("merge-payouts")) {
-			// Mering multiple payouts to one
-			for (Payout payout_ : applicablePayouts) {
-				payout.commands.addAll(payout_.commands);
-				payout.commands_if_afk.addAll(payout_.commands_if_afk);
-				payout.payout_amount += payout_.payout_amount;
-				payout.max_payout_per_day += payout_.max_payout_per_day;
-			}	
-		}else {
-			payout = applicablePayouts.get(applicablePayouts.size() - 1);
-		}
-
 		if (payout.max_payout_per_day != -1) {
-			if (playerData.getReceivedToday() >= payout.max_payout_per_day) { //Reached max payout
+			if (payoutPlayerData.getReceivedToday() >= payout.max_payout_per_day) { //Reached max payout
 				
 				if(finalconfig.getBoolean("display-payout-limit-reached-message-once") && payoutLimitReached.contains(player.getUniqueId())) {
 					return;
@@ -341,12 +358,21 @@ public class Main extends JavaPlugin {
 				return;
 			}
 		}
-		
+
 		if (!finalconfig.getBoolean("allow-multiple-accounts") && !player.hasPermission("tim.multipleaccountsbypass")) {
-			int same_address_count = (int) Bukkit.getOnlinePlayers().stream().filter(p -> p.getAddress().getHostString().equals(p.getAddress().getHostString())).count();
+			Set<? extends Player> sameAddressPlayers = Bukkit.getOnlinePlayers().stream().filter(p -> p.getAddress().getHostString().equals(p.getAddress().getHostString())).collect(Collectors.toSet());
+			int same_address_count = sameAddressPlayers.size();
+
 			if (same_address_count > finalconfig.getInt("max-multiple-accounts")) {
-				sendMessage(player, finalconfig.getString("message_multiple_ips"));
-				return;
+				Optional<? extends Player> firstPlayer = sameAddressPlayers.stream().min(Comparator.comparing(Player::getName));
+
+				if (firstPlayer.isPresent()) {
+					// one of the players with multiple ips still should receive a payout
+					if (firstPlayer.get() != player) {
+						sendMessage(player, finalconfig.getString("message_multiple_ips"));
+						return;
+					}
+				}
 			}
 		}
 		
@@ -398,8 +424,12 @@ public class Main extends JavaPlugin {
 				return;
 			}
 		}
-		
+
 		if (finalconfig.getBoolean("store-money-in-bank")) {
+			if(ATM.getBankBalance(player) >= finalconfig.getDouble("atm_balance_limit", Double.MAX_VALUE)) {
+				sendMessage(player, CC(finalconfig.getString("message_atm_limit_reached")));
+				return;
+			}
 			ATM.depositBank(player, payout_amt);
 		} else {
 			double before = 0;
@@ -412,20 +442,20 @@ public class Main extends JavaPlugin {
 		}
 		
 		if (!afk) {
-			if (finalconfig.getBoolean("display-messages-in-chat")) {
+			if (finalconfig.getBoolean("display-messages-in-chat") && payout_amt > 0d) {
 				sendMessage(player, CC(finalconfig.getString("message")).replace("%money%", economy.format(payout_amt)));
 			}
-			if (finalconfig.getBoolean("display-messages-in-actionbar")) {
+			if (finalconfig.getBoolean("display-messages-in-actionbar") && payout_amt > 0d) {
 				sendActionbar(player, CC(finalconfig.getString("message_actionbar")).replace("%money%", economy.format(payout_amt)));
 			}
 			for (String cmd : payout.commands) {
 				dispatchCommandSync(applyPlaceholders(player, cmd.replace("/", "").replaceAll("%player%", player.getName())));
 			}
 		} else {
-			if (finalconfig.getBoolean("display-messages-in-chat") && finalconfig.isSet("message_afk_payout")) {
+			if (finalconfig.getBoolean("display-messages-in-chat") && finalconfig.isSet("message_afk_payout") && payout_amt > 0d) {
 				sendMessage(player, CC(finalconfig.getString("message_afk_payout").replace("%money%", economy.format(payout_amt)).replace("%percent%", "" + afkPercent)));
 			}
-			if (finalconfig.getBoolean("display-messages-in-actionbar") && finalconfig.isSet("message_afk_actionbar_payout")) {
+			if (finalconfig.getBoolean("display-messages-in-actionbar") && finalconfig.isSet("message_afk_actionbar_payout") && payout_amt > 0d) {
 				sendActionbar(player, CC(finalconfig.getString("message_afk_actionbar_payout").replace("%money%", economy.format(payout_amt)).replace("%percent%", "" + afkPercent)));
 			}
 			for (String cmd : payout.commands_if_afk) {
@@ -434,7 +464,7 @@ public class Main extends JavaPlugin {
 		}
 		
 		//ADD PAYED MONEY
-		playerData.setReceivedToday(playerData.getReceivedToday() + payout_amt);
+		payoutPlayerData.setReceivedToday(payoutPlayerData.getReceivedToday() + payout_amt);
 
 		
 		lastLocation.put(player.getUniqueId(), player.getLocation());
@@ -452,7 +482,7 @@ public class Main extends JavaPlugin {
 	private void dispatchCommandSync(final String cmd) {
 		final Server server = this.getServer();
 		
-		this.getServer().getScheduler().runTask(this, () -> server.dispatchCommand(server.getConsoleSender(), cmd));
+		scheduler.runTask(SchedulerType.SYNC, task -> server.dispatchCommand(server.getConsoleSender(), cmd));
 	}
 	
 	/**
@@ -517,19 +547,20 @@ public class Main extends JavaPlugin {
 			
 			times--;
 			for (int i = 0; i < times; i++) {
-				Bukkit.getScheduler().scheduleSyncDelayedTask(this, () -> sendSingleActionbarMessage(player, applyPlaceholders(player, CC(message))), 20L * i);
+				scheduler.runDelayed(SchedulerType.SYNC, task -> sendSingleActionbarMessage(player, applyPlaceholders(player, CC(message))), 20L * i);
 			}
 		}
 	}
 	
 	private void sendSingleActionbarMessage(final Player player, final String message) {
-		String packageName = this.getServer().getClass().getPackage().getName();
-        int version = Integer.parseInt(packageName.substring(packageName.lastIndexOf('.') + 1).split("_")[1]);
-        if(version == 8 || version == 9) {
+		String[] minorMajorVersion = Bukkit.getBukkitVersion().split("-")[0].split("\\.");
+
+        int majorVersion = Integer.parseInt(minorMajorVersion[1]);
+        if(majorVersion == 8 || majorVersion == 9) {
         	// 1_8 -> 1_9
         	sendActionbarReflect(player, message);
         	return;
-        } else if (version < 8) {
+        } else if (majorVersion < 8) {
         	// no action bar support
         	return;
         }
@@ -558,5 +589,9 @@ public class Main extends JavaPlugin {
 
 	public PluginData getPluginData() {
 		return pluginData;
+	}
+
+	public List<Payout> getPayouts() {
+		return payouts;
 	}
 }
